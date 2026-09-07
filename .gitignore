@@ -1,0 +1,40 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+*.key
+*.pem
+*.secret
+
+# Databases
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Production binaries
+sktts-go
+*.exe
+*.out
+
+# Backups
+*.backup*
+*.bak
+backup/
+backups/
+
+# Temporary files
+/tmp/
+tmp/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,958 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"sktts-go/config"
+	"sktts-go/database"
+	"sktts-go/middleware"
+	"sktts-go/services"
+)
+
+const (
+	piperPath  = "/usr/local/bin/piper"
+	modelPath  = "/opt/xtts/model.onnx"
+	voicesPath = "/opt/xtts/voices"
+	serverName = "SKTTS-Go"
+	version    = "1.1.0"
+)
+
+var supportedFormats = []string{
+	"ogg",
+	"opus",
+	"mp3",
+	"wav",
+	"flac",
+	"m4a",
+	"webm",
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+// ============================================================
+// VOICES
+// ============================================================
+
+func listVoices() []string {
+
+	entries, err := os.ReadDir(voicesPath)
+
+	if err != nil {
+		return []string{}
+	}
+
+	voices := make([]string, 0)
+
+	for _, entry := range entries {
+
+		if !entry.IsDir() {
+			continue
+		}
+
+		model := filepath.Join(
+			voicesPath,
+			entry.Name(),
+			"model.onnx",
+		)
+
+		info, err := os.Stat(model)
+
+		if err != nil || info.IsDir() {
+			continue
+		}
+
+		voices = append(
+			voices,
+			entry.Name(),
+		)
+	}
+
+	sort.Strings(voices)
+
+	return voices
+}
+
+func resolveVoiceModel(voice string) (string, string, error) {
+
+	voice = strings.TrimSpace(voice)
+
+	// Sem voice:
+	// mantém compatibilidade com o modelo original.
+	if voice == "" {
+		return modelPath, "default", nil
+	}
+
+	// Segurança:
+	// aceita somente o nome de uma pasta dentro de /voices.
+	if filepath.Base(voice) != voice ||
+		voice == "." ||
+		voice == ".." {
+
+		return "", "", fmt.Errorf(
+			"invalid voice",
+		)
+	}
+
+	model := filepath.Join(
+		voicesPath,
+		voice,
+		"model.onnx",
+	)
+
+	info, err := os.Stat(model)
+
+	if err != nil || info.IsDir() {
+
+		return "", "", fmt.Errorf(
+			"voice not found: %s",
+			voice,
+		)
+	}
+
+	return model, voice, nil
+}
+
+// ============================================================
+// API KEY
+// ============================================================
+
+// ============================================================
+// MAIN
+// ============================================================
+
+func main() {
+	cfg := config.Load()
+
+	if cfg.MaxConcurrentTTS < 1 {
+		cfg.MaxConcurrentTTS = 1
+	}
+
+	ttsSemaphore := make(chan struct{}, cfg.MaxConcurrentTTS)
+
+	if cfg.AdminKey == "" {
+		fmt.Println("AVISO: SKTTS_ADMIN_KEY não configurada")
+	}
+
+	db, err := database.Open(cfg.DatabasePath)
+	if err != nil {
+		fmt.Println("Erro ao abrir banco:", err)
+		return
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		fmt.Println("Erro na migration:", err)
+		return
+	}
+
+	usageService := services.NewUsageService(db)
+	ipBlockService := services.NewIPBlockService(db)
+	quotaService := services.NewQuotaService(
+		usageService,
+		ipBlockService,
+	)
+
+	auth := &middleware.Auth{
+		APIKey:          cfg.APIKey,
+		AdminKey:        cfg.AdminKey,
+		LinkedInFreeKey: cfg.LinkedInFreeKey,
+		DB:              db,
+	}
+
+	_ = quotaService
+
+	r := chi.NewRouter()
+
+	// ========================================================
+	// HEALTH
+	// ========================================================
+
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(
+			w,
+			http.StatusOK,
+			map[string]any{
+				"status":  "healthy",
+				"device":  "cpu",
+				"name":    serverName,
+				"version": version,
+			},
+		)
+	})
+
+	// ========================================================
+	// INFO
+	// ========================================================
+
+	r.Get("/info", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(
+			w,
+			http.StatusOK,
+			map[string]any{
+				"name":            serverName,
+				"version":         version,
+				"engine":          "Piper",
+				"device":          "cpu",
+				"format_required": true,
+				"formats":         supportedFormats,
+				"voices":          listVoices(),
+				"voice_optional":  true,
+				"default_voice":   "default",
+			},
+		)
+	})
+
+	// ========================================================
+	// TTS
+	// ========================================================
+
+	r.With(auth.Middleware).Post(
+		"/tts",
+		func(w http.ResponseWriter, r *http.Request) {
+
+			// ------------------------------------------------
+			// TEXTO
+			// ------------------------------------------------
+
+			text := strings.TrimSpace(
+				r.FormValue("text"),
+			)
+
+			if text == "" {
+
+				writeJSON(
+					w,
+					http.StatusBadRequest,
+					map[string]any{
+						"error": "text is required",
+					},
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// FORMAT
+			// OBRIGATÓRIO
+			// ------------------------------------------------
+
+			format := strings.ToLower(
+				strings.TrimSpace(
+					r.FormValue("format"),
+				),
+			)
+
+			if format == "" {
+
+				writeJSON(
+					w,
+					http.StatusBadRequest,
+					map[string]any{
+						"error":             "format is required",
+						"supported_formats": supportedFormats,
+					},
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// VALIDAR FORMAT
+			// ------------------------------------------------
+
+			switch format {
+
+			case "ogg":
+			case "opus":
+			case "mp3":
+			case "wav":
+			case "flac":
+			case "m4a":
+			case "webm":
+
+			default:
+
+				writeJSON(
+					w,
+					http.StatusBadRequest,
+					map[string]any{
+						"error": fmt.Sprintf(
+							"unsupported format: %s",
+							format,
+						),
+						"supported_formats": supportedFormats,
+					},
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// VOICE
+			//
+			// Opcional.
+			//
+			// voice=Wesley
+			// ------------------------------------------------
+
+			voice := strings.TrimSpace(
+				r.FormValue("voice"),
+			)
+
+			selectedModel, selectedVoice, err :=
+				resolveVoiceModel(voice)
+
+			if err != nil {
+
+				writeJSON(
+					w,
+					http.StatusBadRequest,
+					map[string]any{
+						"success": false,
+						"error":   err.Error(),
+						"voices":  listVoices(),
+					},
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// PIPER -> PCM RAW
+			// ------------------------------------------------
+
+			// ------------------------------------------------
+			// QUOTA / IP
+			// ------------------------------------------------
+
+			// Limite máximo de caracteres por requisição.
+			if len([]rune(text)) > cfg.MaxTextChars {
+				middleware.WriteJSON(
+					w,
+					http.StatusBadRequest,
+					map[string]any{
+						"success": false,
+						"error":   fmt.Sprintf("texto excede o limite máximo de %d caracteres", cfg.MaxTextChars),
+					},
+				)
+				return
+			}
+			authContext := middleware.Get(r)
+
+			if authContext == nil {
+				middleware.WriteJSON(
+					w,
+					http.StatusUnauthorized,
+					map[string]any{
+						"success": false,
+						"error":   "authentication_context_missing",
+					},
+				)
+				return
+			}
+
+			clientIP := r.RemoteAddr
+
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				clientIP = host
+			}
+
+			status, quotaError := quotaService.Check(
+				authContext.KeyID,
+				authContext.Plan,
+				clientIP,
+				len([]rune(text)),
+			)
+
+			if status != 0 {
+				middleware.WriteJSON(
+					w,
+					status,
+					map[string]any{
+						"success": false,
+						"error":   quotaError,
+					},
+				)
+				return
+			}
+
+			// ------------------------------------------------
+			// LIMITE GLOBAL DE CONCORRENCIA
+			// ------------------------------------------------
+			// No maximo 2 geracoes Piper/FFmpeg simultaneas.
+			ttsSemaphore <- struct{}{}
+			defer func() {
+				<-ttsSemaphore
+			}()
+
+			var pcm bytes.Buffer
+
+			piper := exec.Command(
+				piperPath,
+				"--model",
+				selectedModel,
+				"--output-raw",
+			)
+
+			piper.Stdin = strings.NewReader(text)
+			piper.Stdout = &pcm
+
+			var piperErr bytes.Buffer
+			piper.Stderr = &piperErr
+
+			if err := piper.Run(); err != nil {
+
+				http.Error(
+					w,
+					fmt.Sprintf(
+						"piper error: %v",
+						err,
+					),
+					http.StatusInternalServerError,
+				)
+
+				return
+			}
+
+			if pcm.Len() == 0 {
+
+				http.Error(
+					w,
+					"piper produced no audio",
+					http.StatusInternalServerError,
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// FFMPEG
+			// ------------------------------------------------
+
+			var audio bytes.Buffer
+
+			args := []string{
+				"-y",
+
+				"-f",
+				"s16le",
+
+				"-ar",
+				"22050",
+
+				"-ac",
+				"1",
+
+				"-i",
+				"pipe:0",
+			}
+
+			switch format {
+
+			// ------------------------------------------------
+			// OGG / OPUS
+			// ------------------------------------------------
+
+			case "ogg", "opus":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"libopus",
+
+					"-b:a",
+					"32k",
+
+					"-vbr",
+					"on",
+
+					"-ar",
+					"24000",
+
+					"-ac",
+					"1",
+
+					"-f",
+					"ogg",
+				)
+
+			// ------------------------------------------------
+			// MP3
+			// ------------------------------------------------
+
+			case "mp3":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"libmp3lame",
+
+					"-b:a",
+					"64k",
+
+					"-ar",
+					"22050",
+
+					"-ac",
+					"1",
+
+					"-f",
+					"mp3",
+				)
+
+			// ------------------------------------------------
+			// WAV
+			// ------------------------------------------------
+
+			case "wav":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"pcm_s16le",
+
+					"-ar",
+					"22050",
+
+					"-ac",
+					"1",
+
+					"-f",
+					"wav",
+				)
+
+			// ------------------------------------------------
+			// FLAC
+			// ------------------------------------------------
+
+			case "flac":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"flac",
+
+					"-ar",
+					"22050",
+
+					"-ac",
+					"1",
+
+					"-f",
+					"flac",
+				)
+
+			// ------------------------------------------------
+			// M4A / AAC
+			// ------------------------------------------------
+
+			case "m4a":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"aac",
+
+					"-b:a",
+					"96k",
+
+					"-ar",
+					"22050",
+
+					"-ac",
+					"1",
+
+					"-movflags",
+					"+faststart",
+
+					"-f",
+					"ipod",
+				)
+
+			// ------------------------------------------------
+			// WEBM / OPUS
+			// ------------------------------------------------
+
+			case "webm":
+
+				args = append(
+					args,
+
+					"-c:a",
+					"libopus",
+
+					"-b:a",
+					"32k",
+
+					"-vbr",
+					"on",
+
+					"-ar",
+					"24000",
+
+					"-ac",
+					"1",
+
+					"-f",
+					"webm",
+				)
+			}
+
+			// ------------------------------------------------
+			// M4A
+			//
+			// Precisa de arquivo seekable.
+			// ------------------------------------------------
+
+			if format == "m4a" {
+
+				tempFile :=
+					"/tmp/sktss-" +
+						uuid.New().String() +
+						".m4a"
+
+				defer os.Remove(tempFile)
+
+				args = append(
+					args,
+					tempFile,
+				)
+
+				ffmpeg := exec.Command(
+					"ffmpeg",
+					args...,
+				)
+
+				ffmpeg.Stdin = &pcm
+
+				var ffmpegErr bytes.Buffer
+				ffmpeg.Stderr = &ffmpegErr
+
+				if err := ffmpeg.Run(); err != nil {
+
+					http.Error(
+						w,
+						fmt.Sprintf(
+							"ffmpeg error: %v - %s",
+							err,
+							ffmpegErr.String(),
+						),
+						http.StatusInternalServerError,
+					)
+
+					return
+				}
+
+				data, err := os.ReadFile(tempFile)
+
+				if err != nil {
+
+					http.Error(
+						w,
+						fmt.Sprintf(
+							"erro ao ler M4A: %v",
+							err,
+						),
+						http.StatusInternalServerError,
+					)
+
+					return
+				}
+
+				audio.Write(data)
+
+			} else {
+
+				args = append(
+					args,
+					"pipe:1",
+				)
+
+				ffmpeg := exec.Command(
+					"ffmpeg",
+					args...,
+				)
+
+				ffmpeg.Stdin = &pcm
+				ffmpeg.Stdout = &audio
+
+				var ffmpegErr bytes.Buffer
+				ffmpeg.Stderr = &ffmpegErr
+
+				if err := ffmpeg.Run(); err != nil {
+
+					http.Error(
+						w,
+						fmt.Sprintf(
+							"ffmpeg error: %v",
+							err,
+						),
+						http.StatusInternalServerError,
+					)
+
+					return
+				}
+			}
+
+			if audio.Len() == 0 {
+
+				http.Error(
+					w,
+					"ffmpeg produced no audio",
+					http.StatusInternalServerError,
+				)
+
+				return
+			}
+
+			// ------------------------------------------------
+			// REGISTRAR USO
+			// ------------------------------------------------
+
+			if authContext != nil && !authContext.IsAdmin {
+				if err := usageService.Add(
+					authContext.KeyID,
+					clientIP,
+					len([]rune(text)),
+				); err != nil {
+					fmt.Println("Aviso: erro ao registrar uso:", err)
+				}
+			}
+
+			// ------------------------------------------------
+			// VOICE HEADERS
+			// ------------------------------------------------
+
+			w.Header().Set(
+				"X-Voice",
+				selectedVoice,
+			)
+
+			w.Header().Set(
+				"X-Voice-Model",
+				selectedModel,
+			)
+
+			// ------------------------------------------------
+			// RESPONSE HEADERS
+			// ------------------------------------------------
+
+			var contentType string
+			var extension string
+
+			switch format {
+
+			case "ogg", "opus":
+
+				contentType = "audio/ogg; codecs=opus"
+				extension = ".ogg"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"opus",
+				)
+
+				w.Header().Set(
+					"X-Audio-Container",
+					"ogg",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"24000",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+
+			case "mp3":
+
+				contentType = "audio/mpeg"
+				extension = ".mp3"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"mp3",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"22050",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+
+			case "wav":
+
+				contentType = "audio/wav"
+				extension = ".wav"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"pcm_s16le",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"22050",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+
+			case "flac":
+
+				contentType = "audio/flac"
+				extension = ".flac"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"flac",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"22050",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+
+			case "m4a":
+
+				contentType = "audio/mp4"
+				extension = ".m4a"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"aac",
+				)
+
+				w.Header().Set(
+					"X-Audio-Container",
+					"m4a",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"22050",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+
+			case "webm":
+
+				contentType = "audio/webm"
+				extension = ".webm"
+
+				w.Header().Set(
+					"X-Audio-Codec",
+					"opus",
+				)
+
+				w.Header().Set(
+					"X-Audio-Container",
+					"webm",
+				)
+
+				w.Header().Set(
+					"X-Audio-Sample-Rate",
+					"24000",
+				)
+
+				w.Header().Set(
+					"X-Audio-Channels",
+					"1",
+				)
+			}
+
+			// ------------------------------------------------
+			// RESPONSE
+			// ------------------------------------------------
+
+			filename :=
+				uuid.New().String() +
+					extension
+
+			w.Header().Set(
+				"Content-Type",
+				contentType,
+			)
+
+			w.Header().Set(
+				"Content-Length",
+				fmt.Sprintf(
+					"%d",
+					audio.Len(),
+				),
+			)
+
+			w.Header().Set(
+				"Content-Disposition",
+				fmt.Sprintf(
+					"inline; filename=%s",
+					filename,
+				),
+			)
+
+			_, _ = w.Write(
+				audio.Bytes(),
+			)
+		},
+	)
+
+	// ========================================================
+	// SERVER
+	// ========================================================
+
+	fmt.Println(
+		"SKTTS-Go iniciado em",
+	)
+
+	if err := http.ListenAndServe(
+		cfg.Address,
+		r,
+	); err != nil {
+
+		fmt.Println(
+			"Erro no servidor:",
+			err,
+		)
+	}
+}
