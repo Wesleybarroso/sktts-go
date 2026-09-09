@@ -51,83 +51,157 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 // VOICES
 // ============================================================
 
-func listVoices() []string {
-
-	entries, err := os.ReadDir(voicesPath)
-
-	if err != nil {
-		return []string{}
-	}
-
-	voices := make([]string, 0)
-
-	for _, entry := range entries {
-
-		if !entry.IsDir() {
-			continue
-		}
-
-		model := filepath.Join(
-			voicesPath,
-			entry.Name(),
-			"model.onnx",
-		)
-
-		info, err := os.Stat(model)
-
-		if err != nil || info.IsDir() {
-			continue
-		}
-
-		voices = append(
-			voices,
-			entry.Name(),
-		)
-	}
-
-	sort.Strings(voices)
-
-	return voices
+type voiceDefinition struct {
+        Language string
+        Name     string
+        Model    string
 }
 
-func resolveVoiceModel(voice string) (string, string, error) {
+var voiceDefinitions = []voiceDefinition{
+        // PT-BR
+        {"pt-BR", "Cadu", filepath.Join(voicesPath, "Cadu", "model.onnx")},
+        {"pt-BR", "Dii", filepath.Join(voicesPath, "Dii", "model.onnx")},
+        {"pt-BR", "Edresson", filepath.Join(voicesPath, "Edresson", "model.onnx")},
+        {"pt-BR", "Faber", filepath.Join(voicesPath, "Faber", "model.onnx")},
+        {"pt-BR", "Jeff", filepath.Join(voicesPath, "Jeff", "model.onnx")},
+        {"pt-BR", "Miro", filepath.Join(voicesPath, "Miro", "model.onnx")},
+        {"pt-BR", "Razo", filepath.Join(voicesPath, "Razo", "model.onnx")},
+        {"pt-BR", "Wesley", filepath.Join(voicesPath, "Wesley", "model.onnx")},
 
-	voice = strings.TrimSpace(voice)
+        // EN-US
+        {"en-US", "hfc_female", filepath.Join(voicesPath, "en_US", "hfc_female", "medium", "en_US-hfc_female-medium.onnx")},
+        {"en-US", "hfc_male", filepath.Join(voicesPath, "en_US", "hfc_male", "medium", "en_US-hfc_male-medium.onnx")},
+        {"en-US", "Joe", filepath.Join(voicesPath, "en_US", "joe", "medium", "en_US-joe-medium.onnx")},
+        {"en-US", "John", filepath.Join(voicesPath, "en_US", "john", "medium", "en_US-john-medium.onnx")},
 
-	// Sem voice:
-	// mantém compatibilidade com o modelo original.
-	if voice == "" {
-		return modelPath, "default", nil
-	}
+        // ES-ES
+        {"es-ES", "CarlFM", filepath.Join(voicesPath, "es_ES", "carlfm", "x_low", "es_ES-carlfm-x_low.onnx")},
+        {"es-ES", "Sharvard", filepath.Join(voicesPath, "es_ES", "sharvard", "medium", "es_ES-sharvard-medium.onnx")},
+}
 
-	// Segurança:
-	// aceita somente o nome de uma pasta dentro de /voices.
-	if filepath.Base(voice) != voice ||
-		voice == "." ||
-		voice == ".." {
+func listVoices() []string {
+        voices := make([]string, 0, len(voiceDefinitions))
 
-		return "", "", fmt.Errorf(
-			"invalid voice",
-		)
-	}
+        for _, voice := range voiceDefinitions {
+                if info, err := os.Stat(voice.Model); err == nil && !info.IsDir() {
+                        voices = append(voices, voice.Name)
+                }
+        }
 
-	model := filepath.Join(
-		voicesPath,
-		voice,
-		"model.onnx",
-	)
+        sort.Strings(voices)
 
-	info, err := os.Stat(model)
+        return voices
+}
 
-	if err != nil || info.IsDir() {
+func listVoicesByLanguage() map[string][]string {
+        result := make(map[string][]string)
 
-		return "", "", fmt.Errorf(
-			"voice not found: %s",
-			voice,
-		)
-	}
+        for _, voice := range voiceDefinitions {
+                if info, err := os.Stat(voice.Model); err != nil || info.IsDir() {
+                        continue
+                }
 
-	return model, voice, nil
+                result[voice.Language] = append(
+                        result[voice.Language],
+                        voice.Name,
+                )
+        }
+
+        for language := range result {
+                sort.Strings(result[language])
+        }
+
+        return result
+}
+
+func resolveVoiceModel(voice string, language string) (string, string, error) {
+
+        voice = strings.TrimSpace(voice)
+        language = strings.TrimSpace(language)
+
+        // Sem voice:
+        // mantém compatibilidade com o modelo original.
+        if voice == "" {
+                return modelPath, "default", nil
+        }
+
+        // Segurança contra path traversal.
+        if filepath.Base(voice) != voice ||
+                voice == "." ||
+                voice == ".." {
+
+                return "", "", fmt.Errorf("invalid voice")
+        }
+
+        if language != "" {
+
+                if filepath.Base(language) != language ||
+                        language == "." ||
+                        language == ".." {
+
+                        return "", "", fmt.Errorf("invalid language")
+                }
+
+                for _, definition := range voiceDefinitions {
+
+                        if !strings.EqualFold(
+                                definition.Language,
+                                language,
+                        ) || !strings.EqualFold(
+                                definition.Name,
+                                voice,
+                        ) {
+                                continue
+                        }
+
+                        info, err := os.Stat(definition.Model)
+
+                        if err != nil || info.IsDir() {
+                                return "", "", fmt.Errorf(
+                                        "voice not found: %s",
+                                        voice,
+                                )
+                        }
+
+                        return definition.Model, definition.Name, nil
+                }
+
+                return "", "", fmt.Errorf(
+                        "voice not found for language %s: %s",
+                        language,
+                        voice,
+                )
+        }
+
+        // Compatibilidade com a API anterior:
+        // voice=Wesley
+        // voice=Cadu
+        // etc.
+        for _, definition := range voiceDefinitions {
+
+                if !strings.EqualFold(
+                        definition.Name,
+                        voice,
+                ) {
+                        continue
+                }
+
+                info, err := os.Stat(definition.Model)
+
+                if err != nil || info.IsDir() {
+                        return "", "", fmt.Errorf(
+                                "voice not found: %s",
+                                voice,
+                        )
+                }
+
+                return definition.Model, definition.Name, nil
+        }
+
+        return "", "", fmt.Errorf(
+                "voice not found: %s",
+                voice,
+        )
 }
 
 // ============================================================
@@ -577,6 +651,8 @@ func main() {
 				"format_required": true,
 				"formats":         supportedFormats,
 				"voices":          listVoices(),
+				"voices_by_language": listVoicesByLanguage(),
+				"languages":          []string{"pt-BR", "en-US", "es-ES"},
 				"voice_optional":  true,
 				"default_voice":   "default",
 			},
@@ -676,12 +752,16 @@ func main() {
 			// voice=Wesley
 			// ------------------------------------------------
 
+			language := strings.TrimSpace(
+				r.FormValue("language"),
+			)
+
 			voice := strings.TrimSpace(
 				r.FormValue("voice"),
 			)
 
 			selectedModel, selectedVoice, err :=
-				resolveVoiceModel(voice)
+				resolveVoiceModel(voice, language)
 
 			if err != nil {
 

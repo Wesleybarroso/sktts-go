@@ -138,7 +138,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			auth := &AuthContext{
 				KeyID:   "legacy",
 				KeyType: "client",
-				Plan:    "legacy",
+				Plan:    "free_24h",
 			}
 
 			ctx := context.WithValue(

@@ -5,7 +5,9 @@ API de Text-to-Speech (TTS) desenvolvida em Go utilizando o Piper.
 ## Recursos
 
 - Text-to-Speech via API REST
-- Múltiplas vozes
+- 14 vozes Piper
+- Português Brasileiro, Inglês e Espanhol
+- Seleção de idioma e voz
 - OGG, OPUS, MP3, WAV, FLAC, M4A e WebM
 - API Keys
 - Autenticação
@@ -18,35 +20,62 @@ API de Text-to-Speech (TTS) desenvolvida em Go utilizando o Piper.
 - Documentação integrada
 - Health Check
 
+## Idiomas e vozes
+
+### Português Brasileiro — pt-BR
+
+Cadu, Dii, Edresson, Faber, Jeff, Miro, Razo, Wesley
+
+### Inglês — en-US
+
+hfc_female, hfc_male, Joe, John
+
+### Espanhol — es-ES
+
+CarlFM, Sharvard
+
 ## Endpoints
 
-### Health Check
+### GET /health
 
-GET /health
+Verifica se a API está funcionando.
 
-### Informações da API
+### GET /info
 
-GET /info
+Retorna informações da API, incluindo idiomas, vozes, vozes agrupadas por idioma e formatos disponíveis.
 
-### Gerar áudio
+### POST /tts
 
-POST /tts
+Gera áudio a partir de um texto.
+
+Parâmetros:
+
+- text — texto que será convertido em áudio
+- language — idioma da voz
+- voice — voz utilizada
+- format — formato de saída
+
+## Exemplo PT-BR
+
+curl -X POST -H "X-API-Key: SUA_API_KEY" --data-urlencode "text=Olá, este é um teste." --data-urlencode "language=pt-BR" --data-urlencode "voice=Cadu" --data-urlencode "format=ogg" http://localhost:8000/tts --output audio.ogg
+
+## Exemplo EN-US
+
+curl -X POST -H "X-API-Key: SUA_API_KEY" --data-urlencode "text=Hello, this is a test." --data-urlencode "language=en-US" --data-urlencode "voice=Joe" --data-urlencode "format=ogg" http://localhost:8000/tts --output audio.ogg
+
+## Exemplo ES-ES
+
+curl -X POST -H "X-API-Key: SUA_API_KEY" --data-urlencode "text=Hola, esta es una prueba." --data-urlencode "language=es-ES" --data-urlencode "voice=Sharvard" --data-urlencode "format=ogg" http://localhost:8000/tts --output audio.ogg
+
+## Compatibilidade
+
+Clientes antigos podem continuar utilizando o parâmetro voice sem informar language.
 
 Exemplo:
 
-curl -X POST \
-  -H "X-API-Key: SUA_API_KEY" \
-  --data-urlencode "text=Olá, este é um teste." \
-  --data-urlencode "format=ogg" \
-  --data-urlencode "voice=Wesley" \
-  http://localhost:8000/tts \
-  --output audio.ogg
+curl -X POST -H "X-API-Key: SUA_API_KEY" --data-urlencode "text=Olá, este é um teste." --data-urlencode "voice=Wesley" --data-urlencode "format=ogg" http://localhost:8000/tts --output audio.ogg
 
-## Vozes
-
-As vozes disponíveis podem ser consultadas através de:
-
-GET /info
+Quando language é informado, a voz é resolvida dentro do idioma solicitado.
 
 ## Formatos
 
@@ -60,17 +89,11 @@ GET /info
 
 ## Documentação
 
-A documentação está disponível em:
+A documentação integrada está disponível em:
 
 GET /docs
 
-Exemplo:
-
-http://localhost:8000/docs
-
 ## Configuração
-
-Variáveis de ambiente:
 
 XTTS_API_KEY=
 SKTTS_ADMIN_KEY=
@@ -82,18 +105,13 @@ Consulte o arquivo .env.example.
 
 ## Execução
 
-Compilar:
-
 go build -o sktts-go .
-
-Executar:
 
 ./sktts-go
 
 ## Estrutura
 
 sktts-go/
-├── config/
 ├── database/
 ├── docs/
 ├── middleware/
