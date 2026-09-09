@@ -401,7 +401,8 @@ O corpo da requisição utiliza parâmetros de formulário.
   -H "X-API-Key: SUA_API_KEY" \
   --data-urlencode "text=Olá, este é um teste." \
   --data-urlencode "format=ogg" \
-  --data-urlencode "voice=Wesley" \
+  --data-urlencode "language=pt-BR" \
+  --data-urlencode "voice=Cadu" \
   --output audio.ogg</code></pre>
 
 </section>
@@ -470,6 +471,11 @@ Não requer autenticação.
   "default_voice": "default",
   "voice_optional": true,
   "format_required": true,
+  "languages": [
+    "pt-BR",
+    "en-US",
+    "es-ES"
+  ],
   "voices": [
     "Cadu",
     "Dii",
@@ -478,8 +484,19 @@ Não requer autenticação.
     "Jeff",
     "Miro",
     "Razo",
-    "Wesley"
+    "Wesley",
+    "hfc_female",
+    "hfc_male",
+    "Joe",
+    "John",
+    "CarlFM",
+    "Sharvard"
   ],
+  "voices_by_language": {
+    "pt-BR": ["Cadu", "Dii", "Edresson", "Faber", "Jeff", "Miro", "Razo", "Wesley"],
+    "en-US": ["hfc_female", "hfc_male", "Joe", "John"],
+    "es-ES": ["CarlFM", "Sharvard"]
+  },
   "formats": [
     "ogg",
     "opus",
@@ -548,6 +565,12 @@ Converte texto em áudio utilizando uma das vozes disponíveis.
 </tr>
 
 <tr>
+<td><code>language</code></td>
+<td>Não</td>
+<td>Idioma da voz: <code>pt-BR</code>, <code>en-US</code> ou <code>es-ES</code>.</td>
+</tr>
+
+<tr>
 <td><code>voice</code></td>
 <td>Não</td>
 <td>Voz utilizada na síntese.</td>
@@ -560,7 +583,8 @@ Converte texto em áudio utilizando uma das vozes disponíveis.
   -H "X-API-Key: SUA_API_KEY" \
   --data-urlencode "text=Olá, seja bem-vindo à SKTTS-Go." \
   --data-urlencode "format=ogg" \
-  --data-urlencode "voice=Wesley" \
+  --data-urlencode "language=pt-BR" \
+  --data-urlencode "voice=Cadu" \
   --output audio.ogg</code></pre>
 
 <div class="note">
